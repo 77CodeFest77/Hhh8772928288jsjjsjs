@@ -1,0 +1,28 @@
+name: Подключение к FunPay и управление лотами
+
+on:
+  workflow_dispatch:   # можно запустить вручную из вкладки Actions
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 часов (максимум для GitHub Actions)
+
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      - name: Запуск бота
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FUNPAY_GOLDEN_KEY: ${{ secrets.FUNPAY_GOLDEN_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
