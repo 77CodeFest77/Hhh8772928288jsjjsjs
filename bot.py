@@ -1,61 +1,64 @@
 import os
+import asyncio
 import telebot
 from telebot import types
-from FunPayAPI import Account
+from FunPayNexusAPI import Bot as FunPayBot, Dispatcher
 
-# ---------- Инициализация ----------
+# --- Инициализация ---
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 GOLDEN_KEY = os.environ['FUNPAY_GOLDEN_KEY']
 ADMIN_ID = int(os.environ['TELEGRAM_CHAT_ID'])
 
 bot = telebot.TeleBot(TOKEN)
-fp_account = Account(GOLDEN_KEY).get()  # основное подключение к FunPay
 
-# ---------- Проверка подключения ----------
-def check_connection():
+# --- Инициализация FunPay клиента ---
+funpay_bot = FunPayBot(golden_key=GOLDEN_KEY)
+dispatcher = Dispatcher(funpay_bot)
+
+async def get_funpay_profile():
+    """Функция для получения информации о профиле FunPay."""
     try:
-        lots = fp_account.get_lots()
-        return True, f"✅ Подключено! Найдено лотов: {len(lots)}"
+        account = dispatcher.account
+        username = await account.username
+        balance = await account.balance
+        lots = await account.get_lots() # <-- Вот он, метод для получения лотов!
+        return username, balance, lots
     except Exception as e:
-        return False, f"❌ Ошибка подключения: {e}"
+        raise e
 
-# ---------- Стартовое меню ----------
-def show_menu(chat_id):
-    connected, status_text = check_connection()
-    markup = types.InlineKeyboardMarkup()
-    if connected:
-        markup.add(types.InlineKeyboardButton("📋 Активные предложения", callback_data="show_lots"))
-    else:
-        markup.add(types.InlineKeyboardButton("🔄 Проверить снова", callback_data="check_again"))
-    bot.send_message(chat_id, status_text, reply_markup=markup)
-
-# ---------- Обработчик кнопок ----------
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.data == "show_lots":
-        try:
-            lots = fp_account.get_lots()
-            if not lots:
-                bot.send_message(call.message.chat.id, "У вас нет активных предложений.")
-            else:
-                text = "📦 **Активные предложения:**\n"
-                for lot in lots[:30]:  # ограничение, чтобы не превысить лимит Telegram
-                    lot_id = lot.id
-                    title = getattr(lot, 'description', None) or getattr(lot, 'title', 'Без названия')
-                    price = f"{lot.price} {lot.currency}" if hasattr(lot, 'price') else "???"
-                    text += f"• `{lot_id}` — {title} — {price}\n"
-                text += f"\nВсего: {len(lots)} шт."
-                bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
-        except Exception as e:
-            bot.send_message(call.message.chat.id, f"⚠️ Не удалось загрузить список: {e}")
-    elif call.data == "check_again":
-        show_menu(call.message.chat.id)
-    bot.answer_callback_query(call.id)
-
-# ---------- При запуске ----------
-if __name__ == '__main__':
+def get_profile_sync():
+    """Обёртка для вызова асинхронной функции."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        show_menu(ADMIN_ID)  # отправляем статус администратору
+        username, balance, lots = loop.run_until_complete(get_funpay_profile())
+        return username, balance, lots
+    finally:
+        loop.close()
+
+# --- Кнопка "Активные предложения" ---
+@bot.callback_query_handler(func=lambda call: call.data == "show_lots")
+def callback_show_lots(call):
+    try:
+        username, balance, lots = get_profile_sync()
+        if not lots:
+            bot.send_message(call.message.chat.id, "🏷 У вас пока нет активных предложений.")
+            return
+        
+        # Формируем сообщение со списком лотов
+        text = f"👤 Продавец: **{username}**\n💰 Баланс: **{balance} руб.**\n\n📦 **Активные предложения ({len(lots)} шт.):**\n\n"
+        for lot in lots:
+            # Адаптируй поля под реальный объект lot (скорее всего, это словарь)
+            lot_id = lot.get('id', 'Н/Д')
+            lot_desc = lot.get('description', 'Без названия')
+            lot_price = lot.get('price', 'Н/Д')
+            text += f"• **{lot_desc}**\n  ID: `{lot_id}` | 💵 Цена: {lot_price} руб.\n\n"
+            if len(text) > 3500: # Защита от превышения лимита Telegram
+                text += "...\n(показаны не все лоты)"
+                break
+
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
     except Exception as e:
-        print(f"Не удалось отправить стартовое сообщение: {e}")
-    bot.infinity_polling()
+        bot.send_message(call.message.chat.id, f"❌ Ошибка при получении лотов: {e}")
+    finally:
+        bot.answer_callback_query(call.id)
