@@ -9,8 +9,6 @@ GOLDEN_KEY = os.environ['FUNPAY_GOLDEN_KEY']
 ADMIN_ID = int(os.environ['TELEGRAM_CHAT_ID'])
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-# Сессия с авторизацией под FunPay
 session = requests.Session()
 session.cookies.set('golden_key', GOLDEN_KEY, domain='funpay.com')
 
@@ -28,14 +26,55 @@ def get_lots():
     r = session.get('https://funpay.com/lots/offer', timeout=15)
     soup = BeautifulSoup(r.text, 'html.parser')
     lots = []
+
+    # Вариант 1: .offer-list-item с data-id (старый)
     for item in soup.select('.offer-list-item'):
         try:
-            title = item.select_one('.offer-list-item-title').get_text(strip=True)
-            price = item.select_one('.tc-price').get_text(strip=True)
-            lot_id = item.get('data-id', '')
-            lots.append({'id': lot_id, 'title': title, 'price': price})
+            title_el = item.select_one('.offer-list-item-title')
+            price_el = item.select_one('.tc-price')
+            if title_el and price_el:
+                title = title_el.get_text(strip=True)
+                price = price_el.get_text(strip=True)
+                lot_id = item.get('data-id', '')
+                lots.append({'id': lot_id, 'title': title, 'price': price})
         except:
             continue
+
+    # Вариант 2: Блоки с классом .tc-item (более новый дизайн)
+    if not lots:
+        for item in soup.select('.tc-item'):
+            try:
+                title_el = item.select_one('.tc-item-title, .tc-desc, .lot-title')
+                price_el = item.select_one('.tc-price, .price, .lot-price')
+                lot_id = item.get('data-id', item.get('id', ''))
+                if title_el and price_el:
+                    title = title_el.get_text(strip=True)
+                    price = price_el.get_text(strip=True)
+                    lots.append({'id': lot_id, 'title': title, 'price': price})
+            except:
+                continue
+
+    # Вариант 3: Ищем любые строки таблицы с data-id
+    if not lots:
+        for row in soup.find_all('tr', attrs={'data-id': True}):
+            try:
+                cells = row.find_all('td')
+                if len(cells) >= 3:
+                    title = cells[0].get_text(strip=True)
+                    price = cells[2].get_text(strip=True)
+                    lot_id = row['data-id']
+                    lots.append({'id': lot_id, 'title': title, 'price': price})
+            except:
+                continue
+
+    # Диагностика: если лотов нет, отправляем фрагмент HTML
+    if not lots:
+        body = soup.find('body')
+        if body:
+            snippet = str(body)[:2000]
+            bot.send_message(ADMIN_ID, f"⚠️ Лоты не найдены. HTML-фрагмент:\n\n{snippet}")
+        else:
+            bot.send_message(ADMIN_ID, "⚠️ Пустая страница с лотами. Возможно, требуется повторная авторизация.")
     return lots
 
 @bot.message_handler(commands=['start'])
@@ -50,7 +89,7 @@ def show_lots(call):
     try:
         lots = get_lots()
         if not lots:
-            bot.send_message(call.message.chat.id, "🏷 Нет активных предложений.")
+            bot.send_message(call.message.chat.id, "🏷 Нет активных предложений (или не удалось распознать).")
             return
         text = "📦 **Твои лоты:**\n"
         for lot in lots[:30]:
@@ -62,10 +101,8 @@ def show_lots(call):
     bot.answer_callback_query(call.id)
 
 if __name__ == '__main__':
-    # При запуске сразу уведомляем админа
     conn, text = check_connection()
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📋 Активные предложения", callback_data="lots"))
     bot.send_message(ADMIN_ID, text, reply_markup=markup)
-    # И ЗАПУСКАЕМ БЕСКОНЕЧНОЕ ОЖИДАНИЕ КОМАНД
     bot.infinity_polling()
